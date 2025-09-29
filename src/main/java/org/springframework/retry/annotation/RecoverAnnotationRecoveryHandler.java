@@ -21,6 +21,10 @@ import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.stream.Collectors;
 
 import org.springframework.classify.SubclassClassifier;
 import org.springframework.core.annotation.AnnotatedElementUtils;
@@ -60,7 +64,7 @@ public class RecoverAnnotationRecoveryHandler<T> implements MethodInvocationReco
 
 	private final SubclassClassifier<Throwable, Method> classifier = new SubclassClassifier<>();
 
-	private final Map<Method, SimpleMetadata> methods = new HashMap<>();
+	private final Map<Method, SimpleMetadata> methods = new LinkedHashMap<>();
 
 	private final Object target;
 
@@ -195,7 +199,15 @@ public class RecoverAnnotationRecoveryHandler<T> implements MethodInvocationReco
 		if (retryable != null) {
 			this.recoverMethodName = retryable.recover();
 		}
-		ReflectionUtils.doWithMethods(target.getClass(), candidate -> {
+
+		Method[] declared = target.getClass().getDeclaredMethods();
+		Arrays.sort(declared, Comparator.comparing(Method::getName)
+			.thenComparingInt(Method::getParameterCount)
+			.thenComparing(
+					m -> Arrays.stream(m.getParameterTypes()).map(Class::getName).collect(Collectors.joining(","))));
+
+		for (int i = declared.length - 1; i >= 0; i--) {
+			Method candidate = declared[i];
 			Recover recover = AnnotatedElementUtils.findMergedAnnotation(candidate, Recover.class);
 			if (recover == null) {
 				recover = findAnnotationOnTarget(target, candidate);
@@ -210,7 +222,8 @@ public class RecoverAnnotationRecoveryHandler<T> implements MethodInvocationReco
 			else if (recover != null && candidate.getReturnType().isAssignableFrom(failingMethod.getReturnType())) {
 				putToMethodsMap(candidate, types);
 			}
-		});
+		}
+
 		this.classifier.setTypeMap(types);
 		optionallyFilterMethodsBy(failingMethod.getReturnType());
 	}
@@ -280,7 +293,7 @@ public class RecoverAnnotationRecoveryHandler<T> implements MethodInvocationReco
 	}
 
 	private void optionallyFilterMethodsBy(Class<?> returnClass) {
-		Map<Method, SimpleMetadata> filteredMethods = new HashMap<>();
+		Map<Method, SimpleMetadata> filteredMethods = new LinkedHashMap<>();
 		for (Method method : this.methods.keySet()) {
 			if (method.getReturnType() == returnClass) {
 				filteredMethods.put(method, this.methods.get(method));
