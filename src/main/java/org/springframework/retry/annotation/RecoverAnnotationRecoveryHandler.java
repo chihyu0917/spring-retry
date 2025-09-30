@@ -19,11 +19,13 @@ package org.springframework.retry.annotation;
 import java.lang.reflect.Method;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.Arrays;
+import java.util.List;
+import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 import org.springframework.classify.SubclassClassifier;
@@ -77,6 +79,7 @@ public class RecoverAnnotationRecoveryHandler<T> implements MethodInvocationReco
 
 	@Override
 	public T recover(Object[] args, Throwable cause) {
+		Class<? extends Throwable> causeType = (cause == null) ? null : cause.getClass();
 		Method method = findClosestMatch(args, cause.getClass());
 		if (method == null) {
 			throw new ExhaustedRetryException("Cannot locate recovery method", cause);
@@ -115,48 +118,59 @@ public class RecoverAnnotationRecoveryHandler<T> implements MethodInvocationReco
 		}
 	}
 
-	private Method findClosestMatch(Object[] args, Class<? extends Throwable> cause) {
-		Method result = null;
+	private Method findClosestMatch(Object[] args, Class<? extends Throwable> causeType) {
+		List<Method> methodsWithThrowable = new ArrayList<>();
+		List<Method> methodsWithoutThrowable = new ArrayList<>();
 
-		if (!StringUtils.hasText(this.recoverMethodName)) {
-			int min = Integer.MAX_VALUE;
-			for (Map.Entry<Method, SimpleMetadata> entry : this.methods.entrySet()) {
-				Method method = entry.getKey();
-				SimpleMetadata meta = entry.getValue();
-				Class<? extends Throwable> type = meta.getType();
-				if (type == null) {
-					type = Throwable.class;
+		for (Method method : this.methods.keySet()) {
+			SimpleMetadata meta = this.methods.get(method);
+			if (meta.getType() != null) {
+				methodsWithThrowable.add(method);
+			}
+			else {
+				methodsWithoutThrowable.add(method);
+			}
+		}
+
+		Method bestMatch = null;
+
+		if (causeType != null) {
+			int minDistance = Integer.MAX_VALUE;
+			for (Method method : methodsWithThrowable) {
+				if (!compareParameters(args, method.getParameterCount(), method.getParameterTypes(), false)) {
+					continue;
 				}
-				if (type.isAssignableFrom(cause)) {
-					int distance = calculateDistance(cause, type);
-					if (distance < min) {
-						min = distance;
-						result = method;
-					}
-					else if (distance == min) {
-						boolean parametersMatch = compareParameters(args, meta.getArgCount(),
-								method.getParameterTypes(), false);
-						if (parametersMatch) {
-							result = method;
-						}
+
+				SimpleMetadata meta = this.methods.get(method);
+				Class<? extends Throwable> methodExceptionType = meta.getType();
+				int distance = calculateDistance(causeType, methodExceptionType);
+
+				if (bestMatch == null) {
+					bestMatch = method;
+					minDistance = distance;
+				}
+				else if (distance < minDistance) {
+					minDistance = distance;
+					bestMatch = method;
+				}
+				else if (distance == minDistance) {
+					if (method.getParameterCount() > bestMatch.getParameterCount()) {
+						bestMatch = method;
 					}
 				}
 			}
 		}
-		else {
-			for (Map.Entry<Method, SimpleMetadata> entry : this.methods.entrySet()) {
-				Method method = entry.getKey();
-				if (method.getName().equals(this.recoverMethodName)) {
-					SimpleMetadata meta = entry.getValue();
-					if ((meta.type == null || meta.type.isAssignableFrom(cause))
-							&& compareParameters(args, meta.getArgCount(), method.getParameterTypes(), true)) {
-						result = method;
-						break;
-					}
+
+		if (bestMatch == null) {
+			for (Method method : methodsWithoutThrowable) {
+				if (compareParameters(args, method.getParameterCount(), method.getParameterTypes(), false)) {
+					bestMatch = method;
+					break;
 				}
 			}
 		}
-		return result;
+
+		return bestMatch;
 	}
 
 	private int calculateDistance(Class<? extends Throwable> cause, Class<? extends Throwable> type) {
@@ -179,6 +193,9 @@ public class RecoverAnnotationRecoveryHandler<T> implements MethodInvocationReco
 			for (int i = startingIndex; i < parameterTypes.length; i++) {
 				final Object argument = i - startingIndex < args.length ? args[i - startingIndex] : null;
 				if (argument == null) {
+					if (parameterTypes[i].isPrimitive()) {
+						return false;
+					}
 					continue;
 				}
 				Class<?> parameterType = parameterTypes[i];
@@ -193,21 +210,19 @@ public class RecoverAnnotationRecoveryHandler<T> implements MethodInvocationReco
 	}
 
 	private void init(final Object target, Method method) {
-		final Map<Class<? extends Throwable>, Method> types = new HashMap<>();
+		final Map<Class<? extends Throwable>, Method> types = new LinkedHashMap<>();
 		final Method failingMethod = method;
 		Retryable retryable = AnnotatedElementUtils.findMergedAnnotation(method, Retryable.class);
 		if (retryable != null) {
 			this.recoverMethodName = retryable.recover();
 		}
-
 		Method[] declared = target.getClass().getDeclaredMethods();
 		Arrays.sort(declared, Comparator.comparing(Method::getName)
 			.thenComparingInt(Method::getParameterCount)
 			.thenComparing(
 					m -> Arrays.stream(m.getParameterTypes()).map(Class::getName).collect(Collectors.joining(","))));
 
-		for (int i = declared.length - 1; i >= 0; i--) {
-			Method candidate = declared[i];
+		for (Method candidate : declared) {
 			Recover recover = AnnotatedElementUtils.findMergedAnnotation(candidate, Recover.class);
 			if (recover == null) {
 				recover = findAnnotationOnTarget(target, candidate);
@@ -223,7 +238,6 @@ public class RecoverAnnotationRecoveryHandler<T> implements MethodInvocationReco
 				putToMethodsMap(candidate, types);
 			}
 		}
-
 		this.classifier.setTypeMap(types);
 		optionallyFilterMethodsBy(failingMethod.getReturnType());
 	}
